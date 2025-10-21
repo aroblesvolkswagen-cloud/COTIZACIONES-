@@ -1,0 +1,878 @@
+GEMINI_API_KEY=PLACEHOLDER_API_KEY
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+</div>
+
+# Run and deploy your AI Studio app
+
+This contains everything you need to run your app locally.
+
+View your app in AI Studio: https://ai.studio/apps/drive/1Mldju5IcZTpZ-4PVUahPEQAEoOerHbLt
+
+## Run Locally
+
+**Prerequisites:**  Node.js
+
+
+1. Install dependencies:
+   `npm install`
+2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+3. Run the app:
+   `npm run dev`
+
+import path from 'path';
+import { defineConfig, loadEnv } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig(({ mode }) => {
+    const env = loadEnv(mode, '.', '');
+    return {
+      server: {
+        port: 3000,
+        host: '0.0.0.0',
+      },
+      plugins: [react()],
+      define: {
+        'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+      },
+      resolve: {
+        alias: {
+          '@': path.resolve(__dirname, '.'),
+        }
+      }
+    };
+});
+
+
+import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { Header } from './components/Header';
+import { QuoteComparisonTable } from './components/QuoteComparisonTable';
+import { GeminiAnalysis } from './components/GeminiAnalysis';
+import { Footer } from './components/Footer';
+import { EmptyState } from './components/EmptyState';
+import type { Quote, AnalysisResponse, AppStatus } from './types';
+import { getQuoteAnalysis } from './services/geminiService';
+import { VersionConfirmation } from './components/VersionConfirmation';
+import { AnalysisIndicator } from './components/AnalysisIndicator';
+import { useFileProcessor } from './hooks/useFileProcessor';
+import { calculateDerivedValues, newQuoteTemplate } from './utils';
+import { MobileBlockerModal } from './components/MobileBlockerModal';
+import { SparklesIcon } from './components/icons';
+import AnalysisModeSwitcher from './components/AnalysisModeSwitcher';
+
+// Robust check for mobile user agent, performed once.
+const IS_MOBILE_DEVICE = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+  typeof navigator !== 'undefined' ? navigator.userAgent : ''
+);
+
+
+const App: React.FC = () => {
+    const [quotes, setQuotes] = useState<Quote[]>([]);
+    const [globalClientName, setGlobalClientName] = useState<string>('');
+    const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
+    const [isLoadingAnalysis, setIsLoadingAnalysis] = useState<boolean>(false);
+    const [error, setError] = useState<string | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const analysisRef = useRef<HTMLDivElement>(null);
+    const [isDragging, setIsDragging] = useState(false);
+    const [appStatus, setAppStatus] = useState<AppStatus>('idle');
+    const [clientNameSuggestions, setClientNameSuggestions] = useState<string[]>([]);
+    const [analysisMode, setAnalysisMode] = useState<'simple' | 'complete'>('complete');
+
+    const { processFiles } = useFileProcessor({ setAppStatus });
+
+    const handleFileProcessing = async (files: FileList) => {
+        const { quotes: newQuotes, clientNameSuggestions: suggestions, uniqueClientNames } = await processFiles(files);
+        
+        const allQuotes = [...quotes, ...newQuotes];
+        setQuotes(allQuotes);
+        
+        if (suggestions.length > 0 || uniqueClientNames.size > 1) {
+            const allPossibleNames = new Set([...suggestions, ...uniqueClientNames]);
+            setClientNameSuggestions(Array.from(allPossibleNames));
+            setAppStatus('confirm_versions');
+        } else if (uniqueClientNames.size === 1) {
+            const confirmedName = Array.from(uniqueClientNames)[0];
+            setGlobalClientName(confirmedName);
+            // Show confirmation even for one name to select analysis mode
+            setAppStatus('confirm_versions'); 
+        } else {
+            setClientNameSuggestions([]);
+            // If no names found, still go to confirmation to allow manual entry and mode selection
+            setAppStatus('confirm_versions');
+        }
+    };
+
+    useEffect(() => {
+        if (quotes.length > 0 && globalClientName) {
+            setQuotes(prevQuotes =>
+                prevQuotes.map(q => ({ ...q, nombreCliente: globalClientName }))
+            );
+        }
+    }, [globalClientName]);
+
+    // FIX: Added 'educational' to the mode type to support the new analysis type for PDF exports.
+    const generateOnDemandAnalysis = useCallback(async (mode: 'simple' | 'complete' | 'educational'): Promise<AnalysisResponse> => {
+        const quotesToAnalyze = quotes.filter(q => (q.status === 'success' || q.status === 'editing'));
+         if (quotesToAnalyze.length === 0) {
+            throw new Error("No hay cotizaciones válidas para generar un análisis.");
+        }
+        const result = await getQuoteAnalysis(quotesToAnalyze, globalClientName, mode);
+        return result;
+    }, [quotes, globalClientName]);
+
+    const runAnalysis = useCallback(async (quotesToAnalyze: Quote[], mode: 'simple' | 'complete') => {
+        if (quotesToAnalyze.length === 0) {
+            setAnalysis(null);
+            return;
+        }
+    
+        setIsLoadingAnalysis(true);
+        setError(null);
+        setAnalysis(null);
+    
+        try {
+            const result = await getQuoteAnalysis(quotesToAnalyze, globalClientName, mode);
+            setAnalysis(result);
+        } catch (err) {
+            console.error(err);
+            const errorMessage = err instanceof Error ? err.message : 'Ocurrió un error desconocido al generar el análisis.';
+            setError(errorMessage);
+            setAnalysis({ analysisType: mode, error: errorMessage }); // Set error within analysis object
+        } finally {
+            setIsLoadingAnalysis(false);
+            if (analysisRef.current) {
+                analysisRef.current.scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+    }, [globalClientName]);
+
+    const handleRunAnalysisClick = useCallback(() => {
+        const quotesToAnalyze = quotes.filter(q => q.status === 'success' || q.status === 'editing');
+        if (quotesToAnalyze.length > 0) {
+            runAnalysis(quotesToAnalyze, analysisMode);
+        } else {
+            setError("No hay cotizaciones válidas para analizar.");
+        }
+    }, [quotes, runAnalysis, analysisMode]);
+
+    
+    const handleVersionConfirmation = useCallback(({ confirmedQuotes, confirmedClientName, analysisMode }: { confirmedQuotes: Quote[], confirmedClientName: string, analysisMode: 'simple' | 'complete' }) => {
+        setGlobalClientName(confirmedClientName);
+        const finalQuotes = confirmedQuotes.map(q => calculateDerivedValues({ ...q, nombreCliente: confirmedClientName }));
+        setQuotes(finalQuotes);
+        setClientNameSuggestions([]);
+        setAppStatus('complete');
+        setAnalysisMode(analysisMode);
+        // AUTORUN ANALYSIS
+        runAnalysis(finalQuotes, analysisMode);
+    }, [runAnalysis]);
+    
+    const handleVersionCancel = useCallback(() => {
+        // If user cancels, we just go back to the main view without running analysis.
+        setAppStatus('complete'); 
+        setClientNameSuggestions([]);
+    }, []);
+
+    const addManualQuote = useCallback(() => {
+        const newId = Date.now();
+        let newQuote: Quote = {
+            id: newId,
+            ...JSON.parse(JSON.stringify(newQuoteTemplate)),
+            tipoFinanciamiento: 'credito',
+            nombreCliente: globalClientName,
+            status: 'editing',
+        };
+        newQuote = calculateDerivedValues(newQuote);
+        setQuotes(prev => [...prev, newQuote]);
+        setAppStatus('complete');
+    }, [globalClientName]);
+
+    const handleUploadClick = useCallback(() => {
+        fileInputRef.current?.click();
+    }, []);
+
+    const handleFileChange = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+        const files = event.target.files;
+        if (!files || files.length === 0) return;
+        
+        await handleFileProcessing(files);
+
+        if (event.target) {
+            event.target.value = '';
+        }
+    }, [handleFileProcessing]);
+
+    const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragging(true);
+    }, []);
+
+    const handleDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragging(false);
+    }, []);
+
+    const handleDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDragging(false);
+        const files = e.dataTransfer.files;
+        if (files && files.length > 0) {
+            await handleFileProcessing(files);
+        }
+    }, [handleFileProcessing]);
+
+    const removeQuote = useCallback((id: number) => {
+        setQuotes(prev => {
+            const newQuotes = prev.filter(q => q.id !== id);
+            if (newQuotes.length === 0) {
+                setAnalysis(null);
+            }
+            return newQuotes;
+        });
+    }, []);
+
+    const handleQuoteChange = useCallback((updatedQuote: Quote) => {
+        const recalculatedQuote = calculateDerivedValues(updatedQuote);
+        setQuotes(prev => prev.map(q => q.id === recalculatedQuote.id ? recalculatedQuote : q));
+    }, []);
+
+    const handleReset = useCallback(() => {
+        setQuotes([]);
+        setGlobalClientName('');
+        setAnalysis(null);
+        setError(null);
+        setAppStatus('idle');
+        setClientNameSuggestions([]);
+    }, []);
+    
+    const Card: React.FC<{children: React.ReactNode, className?: string}> = ({ children, className }) => (
+        <div className={`bg-white rounded-lg shadow-sm transition-all duration-300 hover:shadow-md border border-gray-300/80 ${className}`}>
+            {children}
+        </div>
+    );
+    
+    if (IS_MOBILE_DEVICE) {
+        return <MobileBlockerModal />;
+    }
+
+    return (
+        <div className="min-h-screen bg-gray-300 text-gray-900 font-sans">
+            <Header onReset={handleReset} />
+            <main className={`container mx-auto px-2 sm:px-4 py-2 transition-opacity duration-300 ${appStatus === 'parsing' || appStatus === 'confirm_versions' ? 'opacity-20 pointer-events-none' : 'opacity-100'}`}>
+                <div className="space-y-2">
+                    {(appStatus === 'idle' || quotes.length === 0) && (
+                         <Card>
+                            <div className="p-2.5 sm:p-3">
+                                <EmptyState 
+                                    onUploadClick={handleUploadClick}
+                                    onDrop={handleDrop}
+                                    onDragOver={handleDragOver}
+                                    onDragLeave={handleDragLeave}
+                                    onAddManual={addManualQuote}
+                                    isDragging={isDragging}
+                                />
+                                <input
+                                    type="file"
+                                    ref={fileInputRef}
+                                    onChange={handleFileChange}
+                                    accept="application/pdf,image/jpeg,image/png,image/webp"
+                                    multiple
+                                    className="hidden"
+                                />
+                            </div>
+                        </Card>
+                    )}
+
+                    {quotes.length > 0 && (
+                        <Card>
+                             <div className="p-2.5 sm:p-3">
+                                <h2 className="text-base font-bold text-gray-900 mb-0.5">
+                                    Paso 1: Configurar Datos y Análisis
+                                </h2>
+                                <p className="text-xs text-gray-600 mb-1.5">Ajusta los detalles y vuelve a generar el análisis si es necesario.</p>
+                                
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-x-4 gap-y-2 mb-2 items-end">
+                                    <div className="lg:col-span-1">
+                                        <label htmlFor="globalClientName" className="block text-xs font-medium text-gray-700 mb-0.5">Nombre del Cliente</label>
+                                        <input
+                                            type="text"
+                                            id="globalClientName"
+                                            value={globalClientName}
+                                            onChange={(e) => setGlobalClientName(e.target.value)}
+                                            placeholder="Ej. Linda Kenya Guzman Jimenez"
+                                            className="block w-full rounded-md border-gray-400 bg-white shadow-sm focus:border-indigo-700 focus:ring-indigo-700 sm:text-sm p-1 font-semibold text-gray-900"
+                                        />
+                                    </div>
+                                    <div className="lg:col-span-1">
+                                        <label className="block text-xs font-medium text-gray-700 mb-0.5">Modo de Análisis</label>
+                                        <AnalysisModeSwitcher mode={analysisMode} onChange={setAnalysisMode} />
+                                    </div>
+                                     <div className="lg:col-span-1">
+                                        <button
+                                            onClick={handleRunAnalysisClick}
+                                            disabled={isLoadingAnalysis || quotes.filter(q => q.status !== 'error').length === 0}
+                                            className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-800 px-4 py-2 text-white font-bold shadow-md hover:bg-indigo-900 focus:outline-none focus:ring-indigo-700 focus:ring-offset-2 transition-all text-sm disabled:bg-indigo-800/50 disabled:cursor-not-allowed"
+                                        >
+                                            <SparklesIcon className="h-5 w-5" />
+                                            {isLoadingAnalysis ? 'Actualizando...' : (analysis ? 'Actualizar Análisis' : 'Generar Análisis con IA')}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                            <QuoteComparisonTable 
+                                quotes={quotes} 
+                                clientName={globalClientName} 
+                                analysis={analysis} 
+                                viewMode={analysis?.analysisType || 'complete'}
+                                onDemandAnalysis={generateOnDemandAnalysis}
+                                onQuoteChange={handleQuoteChange}
+                                onQuoteRemove={removeQuote}
+                                onAddManualQuote={addManualQuote}
+                            />
+                        </Card>
+                    )}
+                
+                    {quotes.length > 0 && (
+                        <div ref={analysisRef} className="mt-2">
+                            <Card>
+                                <div className="p-2.5 sm:p-3">
+                                    <GeminiAnalysis 
+                                        analysis={analysis} 
+                                        error={error} 
+                                        quotes={quotes.filter(q => q.status !== 'error')} 
+                                        isLoading={isLoadingAnalysis}
+                                    />
+                                </div>
+                            </Card>
+                        </div>
+                    )}
+                </div>
+            </main>
+            
+            {appStatus === 'confirm_versions' && (
+                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm">
+                    <VersionConfirmation 
+                        quotes={quotes.filter(q => q.status !== 'error')} 
+                        onConfirm={handleVersionConfirmation}
+                        onCancel={handleVersionCancel}
+                        clientNameSuggestions={clientNameSuggestions}
+                        initialClientName={globalClientName}
+                    />
+                </div>
+            )}
+            
+            {(appStatus === 'parsing') && (
+                <AnalysisIndicator 
+                    message={"Analizando Documentos..."}
+                    subMessage={"Extrayendo la información de las cotizaciones."}
+                />
+            )}
+
+            <Footer />
+        </div>
+    );
+};
+
+export default App;
+
+// Using uppercase keys for easier matching against bank names which can have varied capitalization.
+// 'light' colors are for backgrounds to ensure text readability.
+export const BANK_COLORS: Record<string, { main: string; light: string }> = {
+  SANTANDER: { main: '#D10000', light: '#FEE5E5' }, // A slightly different Red for distinction
+  BANORTE: { main: '#E2221A', light: '#FCE8E6' }, // Red
+  SCOTIABANK: { main: '#ED1C24', light: '#FEE7E8' }, // Red
+  BBVA: { main: '#004481', light: '#E0E8F0' },   // Blue
+  INBURSA: { main: '#005499', light: '#E0EEF9' }, // Blue
+  HSBC: { main: '#DB0011', light: '#FBE6E7' },   // Red
+  // Add more banks as needed
+  DEFAULT: { main: '#374151', light: '#D1D5DB' } // Gray for others
+};
+
+
+/**
+ * Darkens a hex color by a specified percentage.
+ * @param hex The hex color string (e.g., '#RRGGBB').
+ * @param percent The percentage to darken (0-100).
+ * @returns The new darkened hex color string.
+ */
+export const darkenColor = (hex: string, percent: number): string => {
+    // Ensure hex starts with #
+    if (hex.startsWith('#')) {
+        hex = hex.slice(1);
+    }
+    
+    // Parse the R, G, B values
+    const num = parseInt(hex, 16);
+    let r = (num >> 16);
+    let g = (num >> 8) & 0x00FF;
+    let b = num & 0x0000FF;
+
+    // Apply the darkening factor
+    const factor = 1 - percent / 100;
+    r = Math.max(0, Math.floor(r * factor));
+    g = Math.max(0, Math.floor(g * factor));
+    b = Math.max(0, Math.floor(b * factor));
+
+    // Convert back to hex and pad with zeros
+    const toHex = (c: number) => ('00' + c.toString(16)).slice(-2);
+    
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+};
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Car Loan Quote Analyzer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- jsPDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <!-- jsPDF-AutoTable -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.1.1/",
+    "react": "https://esm.sh/react@^19.1.1",
+    "@google/genai": "https://esm.sh/@google/genai@^1.14.0",
+    "react-dom/": "https://esm.sh/react-dom@^19.1.1/",
+    "jspdf": "https://aistudiocdn.com/jspdf@^3.0.3",
+    "html2canvas": "https://aistudiocdn.com/html2canvas@^1.4.1",
+    "jspdf-autotable": "https://aistudiocdn.com/jspdf-autotable@^5.0.2"
+  }
+}
+</script>
+<style>
+  @keyframes subtle-glow {
+    0%, 100% {
+      box-shadow: 0 0 4px 2px rgba(79, 70, 229, 0.2);
+      border-color: rgba(79, 70, 229, 0.4);
+    }
+    50% {
+      box-shadow: 0 0 8px 3px rgba(79, 70, 229, 0.3);
+      border-color: rgba(79, 70, 229, 0.6);
+    }
+  }
+  .animate-subtle-glow {
+    animation: subtle-glow 3s ease-in-out infinite;
+  }
+  @keyframes attention-glow {
+    0%, 100% {
+      box-shadow: 0 0 5px 2px rgba(79, 70, 229, 0.2);
+    }
+    50% {
+      box-shadow: 0 0 10px 4px rgba(79, 70, 229, 0.4);
+    }
+  }
+  .animate-attention-glow {
+    animation: attention-glow 2.5s ease-in-out infinite;
+  }
+  
+  /* New Alternating Pulse Animation for Buttons */
+  @keyframes pulse-brighten-button {
+    0%, 100% { 
+      transform: scale(1); 
+      box-shadow: 0 0 0 0 rgba(99, 102, 241, 0);
+    }
+    50% { 
+      transform: scale(1.05); 
+      box-shadow: 0 0 10px 3px rgba(99, 102, 241, 0.5);
+    }
+  }
+
+  /* Animate the INACTIVE button to brighten */
+  .animate-pulse-alternating > button:not(.is-active) {
+    animation: pulse-brighten-button 1.5s infinite ease-in-out;
+  }
+
+  /* New style for interactive table row highlighting - PURE CSS SOLUTION */
+  tbody.quote-group:hover > tr > td {
+    background-color: #eef2ff !important; /* indigo-50 */
+    transition: background-color 0.2s ease-in-out;
+  }
+</style>
+<link rel="stylesheet" href="/index.css">
+</head>
+  <body class="bg-gray-300">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
+
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error("Could not find root element to mount to");
+}
+
+const root = ReactDOM.createRoot(rootElement);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+{
+  "name": "Analisis de cotizaciones",
+  "description": "An application to analyze and compare multiple car loan quotes, providing a detailed breakdown and an AI-powered recommendation to help users choose the best financial option.",
+  "requestFramePermissions": []
+}
+{
+  "name": "analisis-de-cotizaciones",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.1.1",
+    "@google/genai": "^1.14.0",
+    "react-dom": "^19.1.1",
+    "jspdf": "^3.0.3",
+    "html2canvas": "^1.4.1",
+    "jspdf-autotable": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}
+
+
+{
+  "rewrites": [
+    {
+      "source": "/:path*",
+      "destination": "/index.html"
+    }
+  ]
+}
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "experimentalDecorators": true,
+    "useDefineForClassFields": false,
+    "module": "ESNext",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "skipLibCheck": true,
+    "types": [
+      "node"
+    ],
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "allowJs": true,
+    "jsx": "react-jsx",
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    },
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  }
+}
+// FIX: Replaced file content with proper type definitions and exports to resolve circular dependencies and missing type errors.
+
+export interface InsuranceDetails {
+    costo: number;
+    tipo: 'contado' | 'financiado' | 'no_incluido';
+    aseguradora: string;
+}
+
+export interface PagoInicial {
+    total: number;
+    enganche: number;
+    comision: number;
+}
+
+export interface Quote {
+    id: number;
+    status: 'success' | 'editing' | 'error';
+    tipoFinanciamiento: 'credito' | 'arrendamiento' | 'options';
+    nombreCliente: string;
+    nombreClienteSugerencia?: string[];
+    banco: string;
+    productoBanco: string;
+    marca: string;
+    version: string;
+    precioVehiculo: number;
+    plazo: number;
+    tasaInteres: number;
+    cat: number;
+    pagoInicial: PagoInicial;
+    depositoEnGarantia: number;
+    valorResidual: number;
+    valorResidualIncluyeIVA: boolean;
+    valorFuturoGarantizado?: number;
+    plazoTotalOpcional?: number;
+    mensualidadPlazoOpcional?: number;
+    montoTotalPagarFase1?: number;
+    montoTotalPagarFase2?: number;
+    mensualidad: number;
+    montoFinanciado: number;
+    costoTotal: number;
+    costoTotalDeUso?: number;
+    fechaCotizacion: string;
+    seguroAuto: InsuranceDetails;
+    seguroVida: InsuranceDetails;
+    seguroDesempleo: InsuranceDetails;
+    fileName?: string;
+    parseError?: string;
+    filenameVersion?: string;
+    ahorroFiscalEstimado?: number;
+}
+
+export type AppStatus = 'idle' | 'parsing' | 'confirm_versions' | 'complete';
+
+export interface SimpleAnalysisSection {
+    version: string;
+    bestQuoteId: number;
+    mensualidad: number;
+    pagoInicial: number;
+    montoFinanciado?: number;
+    seguro: number;
+    tipoSeguro: 'contado' | 'financiado' | 'no_incluido' | '';
+    aseguradora: string;
+    plazo: number;
+}
+
+export interface DetailedAnalysisSection {
+    version: string;
+    verdict: string;
+    keyPoints: string[];
+    bestQuoteId: number;
+}
+
+export interface AnalysisResponse {
+    // FIX: Add 'educational' to analysisType to align with the new analysis mode.
+    analysisType: 'simple' | 'complete' | 'educational';
+    simpleAnalysis?: SimpleAnalysisSection[];
+    detailedAnalysis?: DetailedAnalysisSection[];
+    overallRecommendation?: {
+        bestOverallQuoteId: number;
+        summary: string;
+    };
+    error?: string;
+}
+
+import type { Quote } from './types';
+
+export const calculateDerivedValues = (quote: Quote): Quote => {
+    // This function now calculates initial values before tax analysis.
+    // TCO (costoTotalDeUso) will be calculated after fiscal analysis.
+    if (quote.tipoFinanciamiento === 'arrendamiento') {
+        const pagoInicialBase = quote.pagoInicial.total || 0;
+        const mensualidad = quote.mensualidad || 0; // This is the recurring rent from "Rentas Posteriores"
+        const plazo = quote.plazo || 0;
+        
+        // Ensure upfront insurance cost is included in the non-refundable initial payment.
+        const seguroAutoContado = quote.seguroAuto.tipo === 'contado' ? quote.seguroAuto.costo : 0;
+        const finalPagoInicialTotal = pagoInicialBase + seguroAutoContado;
+
+        // Costo Total = Non-refundable initial payment + (recurring rent * (remaining terms))
+        const costoTotal = finalPagoInicialTotal + (mensualidad * (plazo > 0 ? plazo - 1 : 0));
+        
+        return {
+            ...quote,
+            mensualidad: mensualidad,
+            pagoInicial: { // Ensure credit-specific fields are zeroed out but preserve commission
+                ...quote.pagoInicial,
+                total: finalPagoInicialTotal,
+                enganche: 0,
+            },
+            costoTotal: costoTotal,
+            costoTotalDeUso: quote.ahorroFiscalEstimado ? costoTotal - quote.ahorroFiscalEstimado : costoTotal,
+            // Ensure credit-specific numeric fields are null/zero
+            montoFinanciado: 0, 
+            tasaInteres: 0,
+            cat: 0,
+            // Enforce business rule: leasing does not include these insurances.
+            seguroVida: { costo: 0, tipo: 'no_incluido', aseguradora: '' },
+            seguroDesempleo: { costo: 0, tipo: 'no_incluido', aseguradora: '' },
+        };
+    } else if (quote.tipoFinanciamiento === 'options') {
+        const { pagoInicial, plazo, seguroAuto, seguroVida, seguroDesempleo, precioVehiculo } = quote;
+        const { enganche, comision } = pagoInicial;
+
+        let segurosEnPagoInicial = 0;
+        if (seguroAuto.tipo === 'contado') segurosEnPagoInicial += seguroAuto.costo;
+        if (seguroVida.tipo === 'contado') segurosEnPagoInicial += seguroVida.costo;
+        if (seguroDesempleo.tipo === 'contado') segurosEnPagoInicial += seguroDesempleo.costo;
+
+        let segurosFinanciados = 0;
+        if (seguroAuto.tipo === 'financiado') segurosFinanciados += seguroAuto.costo;
+        if (seguroVida.tipo === 'financiado') segurosFinanciados += seguroVida.costo;
+        if (seguroDesempleo.tipo === 'financiado') segurosFinanciados += seguroDesempleo.costo;
+        
+        // Prioritize parsed Monto Financiado if available, otherwise calculate it.
+        const finalMontoFinanciado = quote.montoFinanciado && quote.montoFinanciado > 0 
+            ? quote.montoFinanciado 
+            : Math.max(0, precioVehiculo - enganche + segurosFinanciados);
+        
+        const finalPagoInicialTotal = enganche + comision + segurosEnPagoInicial;
+        
+        // FIX: Prioritize exact totals from amortization tables for maximum accuracy.
+        // This resolves the data inconsistency issue pointed out by the user.
+        const totalPagosFase1 = quote.montoTotalPagarFase1 && quote.montoTotalPagarFase1 > 0
+            ? quote.montoTotalPagarFase1
+            : (quote.mensualidad || 0) * (plazo || 0);
+            
+        const costoDeUso = finalPagoInicialTotal + totalPagosFase1;
+        
+        const totalPagosFase2 = quote.montoTotalPagarFase2 && quote.montoTotalPagarFase2 > 0
+            ? quote.montoTotalPagarFase2
+            : (quote.mensualidadPlazoOpcional || 0) * ((quote.plazoTotalOpcional || plazo) - plazo);
+
+        const costoDePropiedad = costoDeUso + totalPagosFase2;
+
+        return {
+            ...quote,
+            montoFinanciado: finalMontoFinanciado,
+            pagoInicial: {
+                ...pagoInicial,
+                total: finalPagoInicialTotal,
+            },
+            costoTotal: costoDePropiedad, // Full ownership cost, now calculated with maximum precision.
+            costoTotalDeUso: costoDeUso, // Cost for the initial term (if returned).
+            // Zero out leasing fields to avoid confusion
+            depositoEnGarantia: 0,
+            valorResidual: 0,
+        };
+    } else { // It's a 'credito'
+        const { precioVehiculo, pagoInicial, plazo, seguroAuto, seguroVida, seguroDesempleo, tasaInteres } = quote;
+        const { enganche, comision } = pagoInicial;
+
+        let finalMensualidad = quote.mensualidad;
+
+        let segurosFinanciados = 0;
+        if (seguroAuto.tipo === 'financiado') segurosFinanciados += seguroAuto.costo;
+        if (seguroVida.tipo === 'financiado') segurosFinanciados += seguroVida.costo;
+        if (seguroDesempleo.tipo === 'financiado') segurosFinanciados += seguroDesempleo.costo;
+
+        const finalMontoFinanciado = quote.montoFinanciado && quote.montoFinanciado > 0 
+            ? quote.montoFinanciado 
+            : Math.max(0, precioVehiculo - enganche + segurosFinanciados);
+
+        let segurosEnPagoInicial = 0;
+        if (seguroAuto.tipo === 'contado') segurosEnPagoInicial += seguroAuto.costo;
+        if (seguroVida.tipo === 'contado') segurosEnPagoInicial += seguroVida.costo;
+        if (seguroDesempleo.tipo === 'contado') segurosEnPagoInicial += seguroDesempleo.costo;
+        
+        const finalPagoInicialTotal = enganche + comision + segurosEnPagoInicial;
+
+        if (finalMensualidad <= 0 && finalMontoFinanciado > 0 && plazo > 0) {
+            const numberOfPayments = plazo;
+            if ((tasaInteres || 0) <= 0) {
+                finalMensualidad = finalMontoFinanciado / numberOfPayments;
+            } else {
+                const monthlyRateWithIVA = ((tasaInteres || 0) / 100 / 12) * 1.16;
+                const powerTerm = Math.pow(1 + monthlyRateWithIVA, numberOfPayments);
+                const numerator = monthlyRateWithIVA * powerTerm;
+                const denominator = powerTerm - 1;
+                
+                if (denominator > 0) {
+                   finalMensualidad = finalMontoFinanciado * (numerator / denominator);
+                } else {
+                   finalMensualidad = finalMontoFinanciado / numberOfPayments;
+                }
+            }
+        }
+
+        const finalCostoTotal = (finalMensualidad * plazo) + finalPagoInicialTotal;
+        
+        return {
+            ...quote,
+            mensualidad: finalMensualidad,
+            montoFinanciado: finalMontoFinanciado,
+            pagoInicial: {
+                ...pagoInicial,
+                total: finalPagoInicialTotal,
+            },
+            costoTotal: finalCostoTotal,
+            costoTotalDeUso: finalCostoTotal, // For credit, TCO is the same as CostoTotal
+        };
+    }
+}
+
+export const formatCurrency = (value: number) => {
+    return new Intl.NumberFormat('es-MX', {
+        style: 'currency',
+        currency: 'MXN',
+    }).format(value);
+};
+
+
+export const newQuoteTemplate: Omit<Quote, 'id' | 'status' | 'tipoFinanciamiento'> = {
+  nombreCliente: '',
+  banco: '',
+  productoBanco: '',
+  marca: '',
+  version: '',
+  precioVehiculo: 0,
+  plazo: 72,
+  tasaInteres: 0,
+  cat: 0,
+  pagoInicial: {
+    total: 0,
+    enganche: 0,
+    comision: 0,
+  },
+  depositoEnGarantia: 0,
+  valorResidual: 0,
+  valorResidualIncluyeIVA: true,
+  valorFuturoGarantizado: 0,
+  plazoTotalOpcional: 0,
+  mensualidadPlazoOpcional: 0,
+  montoTotalPagarFase1: 0,
+  montoTotalPagarFase2: 0,
+  mensualidad: 0,
+  montoFinanciado: 0,
+  costoTotal: 0,
+  fechaCotizacion: new Date().toISOString().split('T')[0],
+  seguroAuto: { costo: 0, tipo: 'contado', aseguradora: '' },
+  seguroVida: { costo: 0, tipo: 'no_incluido', aseguradora: '' },
+  seguroDesempleo: { costo: 0, tipo: 'no_incluido', aseguradora: '' },
+};
